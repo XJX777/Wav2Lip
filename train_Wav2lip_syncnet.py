@@ -1,0 +1,180 @@
+from os.path import dirname, join, basename, isfile
+from tqdm import tqdm
+
+from models import SyncNet_color as SyncNet
+import audio
+
+import torch
+from torch import nn
+from torch import optim
+import torch.backends.cudnn as cudnn
+from torch.utils import data as data_utils
+from torch.utils.data import DataLoader
+import numpy as np
+
+from glob import glob
+
+import os, random, cv2, argparse
+from hparams import hparams, get_image_list
+
+
+# new added
+import pdb
+import logging
+from Syncnet_wav2lip import SyncNetPerception
+from dataset.dataset_syncnet_wav2lip_version import DINetDataset
+from torch.utils.tensorboard import SummaryWriter
+
+
+parser = argparse.ArgumentParser(description='Code to train the expert lip-sync discriminator')
+parser.add_argument('--checkpoint_dir', help='Save checkpoints to this directory', required=True, type=str)
+parser.add_argument('--checkpoint_path', help='Resumed from this checkpoint', default=None, type=str)
+args = parser.parse_args()
+
+global_step = 0
+global_epoch = 0
+use_cuda = torch.cuda.is_available()
+print('use_cuda: {}'.format(use_cuda))
+
+syncnet_T = 5
+syncnet_mel_step_size = 16
+
+
+logloss = nn.BCELoss()
+def cosine_loss(a, v, y):
+    d = nn.functional.cosine_similarity(a, v)
+    # d_ = torch.relu(d.unsqueeze(1))
+    # print(d_)
+    d_ = d.unsqueeze(1)
+    loss = logloss(d_, y)
+
+    return loss
+
+def train(device, model, train_data, train_data_loader, optimizer,
+          checkpoint_dir=None, checkpoint_interval=None, nepochs=None):
+
+    global global_step, global_epoch
+    resumed_step = global_step
+    criterionMSE = nn.MSELoss().cuda()
+    writer = SummaryWriter('./logs/syncnet_wav2lip_version/')
+
+    while global_epoch < nepochs:
+        running_loss = 0.
+        prog_bar = tqdm(enumerate(train_data_loader))
+        for step, (source_clip, deep_speech_full, clip_flag) in prog_bar:
+            source_clip = torch.cat(torch.split(source_clip, 1, dim=1), 0).squeeze(1).float().cuda()
+            deep_speech_full = deep_speech_full.float().cuda()
+            clip_flag = clip_flag.cuda()
+            source_clip = torch.cat(torch.split(source_clip, hparams.syncnet_batch_size, dim=0), 1)
+            source_clip_mouth = source_clip[:, :, train_data.radius:train_data.radius + train_data.mouth_region_size,
+                                            train_data.radius_1_4:train_data.radius_1_4 + train_data.mouth_region_size]
+            
+            model.train()
+            optimizer.zero_grad()
+
+            # Transform data to CUDA device
+            source_clip_mouth = source_clip_mouth.to(device)
+            deep_speech_full = deep_speech_full.to(device)
+
+            a_feature, v_feature = model(source_clip_mouth, deep_speech_full)
+            # pdb.set_trace()
+            # print("a_feature shape: ", a_feature.shape)
+            # print("v_feature.shape: ", v_feature.shape)
+            # print("clip_flag.shape: ", clip_flag.shape)
+            
+            loss = cosine_loss(a_feature, v_feature, clip_flag)
+            # loss = criterionMSE(sync_score, clip_flag)
+            # loss_sync = criterionMSE(sync_score, real_tensor.expand_as(sync_score)) * opt.lamb_syncnet_perception 
+            loss.backward()
+            optimizer.step()
+
+            global_step += 1
+            cur_session_steps = global_step - resumed_step
+            running_loss += loss.item()
+
+            if global_step == 1 or global_step % checkpoint_interval == 0:
+                save_checkpoint(
+                    model, optimizer, global_step, checkpoint_dir, global_epoch)
+
+            prog_bar.set_description('global_step: {}  Loss: {}'.format(global_step, running_loss / (step + 1)))
+            writer.add_scalar("Loss_step", float(running_loss / (step + 1)), global_step)
+        
+        global_epoch += 1
+
+def save_checkpoint(model, optimizer, step, checkpoint_dir, epoch):
+
+    checkpoint_path = join(
+        checkpoint_dir, "checkpoint_step{:09d}.pth".format(global_step))
+    optimizer_state = optimizer.state_dict() if hparams.save_optimizer_state else None
+    torch.save({
+        "state_dict": model.state_dict(),
+        "optimizer": optimizer_state,
+        "global_step": step,
+        "global_epoch": epoch,
+    }, checkpoint_path)
+    print("Saved checkpoint:", checkpoint_path)
+
+def _load(checkpoint_path):
+    if use_cuda:
+        checkpoint = torch.load(checkpoint_path)
+    else:
+        checkpoint = torch.load(checkpoint_path,
+                                map_location=lambda storage, loc: storage)
+    return checkpoint
+
+def load_checkpoint(path, model, optimizer, reset_optimizer=False):
+    global global_step
+    global global_epoch
+
+    print("Load checkpoint from: {}".format(path))
+    checkpoint = _load(path)
+    model.load_state_dict(checkpoint["state_dict"])
+    if not reset_optimizer:
+        optimizer_state = checkpoint["optimizer"]
+        if optimizer_state is not None:
+            print("Load optimizer state from {}".format(path))
+            optimizer.load_state_dict(checkpoint["optimizer"])
+    global_step = checkpoint["global_step"]
+    global_epoch = checkpoint["global_epoch"]
+
+    return model
+
+if __name__ == "__main__":
+    checkpoint_dir = args.checkpoint_dir
+    checkpoint_path = args.checkpoint_path
+
+    if not os.path.exists(checkpoint_dir): os.mkdir(checkpoint_dir)
+    # import pdb
+    # pdb.set_trace()
+    
+    # seed = 3407
+    # random.seed(seed)
+    # np.random.seed(seed)
+    # torch.cuda.manual_seed(seed)
+
+    # load training data
+    train_data_json_path = "/workspace/DINet/asserts/training_data/training_json.json"
+    train_data_augment_num = 64
+    train_data_mouth_region_size = 256
+    hparams.syncnet_batch_size = 32
+        
+    train_data = DINetDataset(train_data_json_path, train_data_augment_num, train_data_mouth_region_size)
+    train_data_loader = DataLoader(dataset=train_data,  batch_size=hparams.syncnet_batch_size, shuffle=True,drop_last=True)
+    train_data_length = len(train_data_loader)
+
+    device = torch.device("cuda" if use_cuda else "cpu")
+
+    # Model
+    model = SyncNetPerception("").to(device)
+    print('total trainable params {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
+
+    optimizer = optim.Adam([p for p in model.parameters() if p.requires_grad],
+                           lr=hparams.syncnet_lr)
+
+    if checkpoint_path is not None:
+        load_checkpoint(checkpoint_path, model, optimizer, reset_optimizer=False)
+
+    train(device, model, train_data, train_data_loader, optimizer,
+          checkpoint_dir=checkpoint_dir,
+          checkpoint_interval=hparams.syncnet_checkpoint_interval,
+          nepochs=hparams.nepochs)
