@@ -40,8 +40,6 @@ class DINetDataset(Dataset):
         source_image_path_list = self.data_dic[video_name]['clip_data_list'][source_anchor]['frame_path_list']
         source_clip_list = []
         for source_frame_index in range(2, 2 + 5):
-            ## load source clip
-            # print("source img_path :   ", source_image_path_list[source_frame_index])
             source_image_data = cv2.imread('.' + source_image_path_list[source_frame_index])[:, :, ::-1]
             source_image_data = cv2.resize(source_image_data, (self.img_w, self.img_h)) / 255.0
             source_clip_list.append(source_image_data)
@@ -49,8 +47,6 @@ class DINetDataset(Dataset):
         wrong_image_path_list = self.data_dic[video_name]['clip_data_list'][wrong_anchor]['frame_path_list']
         wrong_clip_list = []
         for wrong_frame_index in range(2, 2 + 5):
-            ## load source clip
-            # print("wrong img_path :   ", wrong_image_path_list[wrong_frame_index])
             wrong_image_data = cv2.imread('.' + wrong_image_path_list[wrong_frame_index])[:, :, ::-1]
             wrong_image_data = cv2.resize(wrong_image_data, (self.img_w, self.img_h)) / 255.0
             wrong_clip_list.append(wrong_image_data)
@@ -86,9 +82,6 @@ class DINetDataset(Dataset):
         source_clip = torch.from_numpy(source_clip).float().permute(0, 3, 1, 2)
         wrong_clip = torch.from_numpy(wrong_clip).float().permute(0, 3, 1, 2)
         deep_speech_full = torch.from_numpy(deep_speech_full).permute(1, 0)
-        # print("source_clip.shape: ", source_clip.shape)
-        # print("wrong_clip.shape: ", wrong_clip.shape)
-        # print("deep_speech_full.shape: ", deep_speech_full.shape)
         if random.choice([True, False]):
             return source_clip, deep_speech_full, torch.ones(1, 8, 8, dtype=torch.float)
         else:

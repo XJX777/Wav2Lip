@@ -190,10 +190,14 @@ class SyncNet(nn.Module):
             nn.Conv2d(out_dim, 1, kernel_size=3, padding=1),
         )
     def forward(self, image,audio):
-        image_embedding = self.face_encoder(image)
+        image_embedding = self.face_encoder(image) 
+        # image_embedding : torch.Size([32, 128, 8, 8])
         audio_embedding = self.audio_encoder(audio).unsqueeze(2).unsqueeze(3).repeat(1,1,image_embedding.size(2),image_embedding.size(3))
+        # audio_embedding : torch.Size([32, 128, 8, 8])
         concat_embedding = torch.cat([image_embedding,audio_embedding],1)
+        # concat_embedding : torch.Size([32, 256, 8, 8])
         out_score = self.merge_encoder(concat_embedding)
+        # out_score : torch.Size([32, 1, 8, 8])
         return out_score
 
 class SyncNetPerception(nn.Module):
